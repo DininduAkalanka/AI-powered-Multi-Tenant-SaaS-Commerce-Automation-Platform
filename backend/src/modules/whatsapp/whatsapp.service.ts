@@ -2,6 +2,7 @@ import { Injectable, Logger, Inject } from '@nestjs/common';
 import { v4 as uuidv4 } from 'uuid';
 import { PrismaService } from '../../common/database/prisma.service';
 import { AiEngineService } from '../ai-engine/ai-engine.service';
+import { ConversationsService } from '../conversations/conversations.service';
 import type {
   IWhatsAppAdapter,
 } from './interfaces/whatsapp-adapter.interface';
@@ -16,8 +17,12 @@ import { MessageDirection, MessageType, MessageStatus } from '@prisma/client';
  * 1. Parsing incoming Meta webhook payloads
  * 2. Storing messages to DB
  * 3. Finding/creating customer records
- * 4. Triggering AI processing
- * 5. Sending replies
+ * 4. Managing multi-turn conversation state (Phase 2)
+ * 5. Triggering AI processing with conversation context
+ * 6. Sending replies
+ *
+ * Phase 2 change: Every message is now processed within a conversation context.
+ * The ConversationsService manages Redis session state across turns.
  */
 @Injectable()
 export class WhatsAppService {
@@ -26,6 +31,7 @@ export class WhatsAppService {
   constructor(
     private readonly prisma: PrismaService,
     private readonly aiEngine: AiEngineService,
+    private readonly conversationsService: ConversationsService,
     @Inject(WHATSAPP_ADAPTER)
     private readonly whatsappAdapter: IWhatsAppAdapter,
   ) {}
@@ -44,7 +50,7 @@ export class WhatsAppService {
     try {
       // TODO: Verify HMAC signature in production
       // const isValid = this.verifySignature(payload, signature);
-      // if (!isValid) throw new ForbiddenException('Invalid webhook signature');
+      // if (!isValid) throw new ForbiddenException('Invalid webhook signature')
 
       const entry = (payload as any)?.entry?.[0];
       if (!entry) return;
@@ -137,7 +143,7 @@ export class WhatsAppService {
     text: string,
     externalMessageId: string,
   ): Promise<void> {
-    // Deduplicate: skip if already processed
+    // ── Step 1: Deduplicate ──────────────────────────────────────
     const existing = await this.prisma.whatsAppMessage.findFirst({
       where: { externalMessageId },
     });
@@ -146,10 +152,22 @@ export class WhatsAppService {
       return;
     }
 
-    // Find or create customer
+    // ── Step 2: Find or create customer ─────────────────────────
     const customer = await this.findOrCreateCustomer(tenantId, phone);
 
-    // Store the message
+    // ── Step 3: Find or create conversation (Phase 2) ───────────
+    const { conversation, session, isNew } =
+      await this.conversationsService.findOrCreateConversation(
+        tenantId,
+        customer.id,
+        phone,
+      );
+
+    this.logger.log(
+      `[${tenantId}] ${isNew ? 'New' : 'Resumed'} conversation ${conversation.id} for ${phone}`,
+    );
+
+    // ── Step 4: Store the message in DB ─────────────────────────
     const message = await this.prisma.whatsAppMessage.create({
       data: {
         id: uuidv4(),
@@ -161,32 +179,62 @@ export class WhatsAppService {
         messageType: MessageType.TEXT,
         status: MessageStatus.RECEIVED,
         externalMessageId,
+        conversationId: conversation.id,
       },
     });
 
-    this.logger.log(`[${tenantId}] Message stored: ${message.id} from ${phone}`);
+    // ── Step 5: Append to conversation history ───────────────────
+    await this.conversationsService.addCustomerMessage(tenantId, phone, text);
 
-    // Get tenant config for AI processing
+    // ── Step 6: Get tenant config for AI processing ─────────────
     const tenant = await this.prisma.tenant.findUnique({
       where: { id: tenantId },
     });
-
     if (!tenant) return;
 
-    // Process through AI pipeline (synchronous for now — BullMQ in Phase 2)
+    // ── Step 7: Get full conversation history for multi-turn AI ──
+    // Include previous messages (excluding the one just added) for context
+    const conversationHistory = session.messageHistory;
+
+    // ── Step 8: Run AI pipeline with conversation context ────────
     const result = await this.aiEngine.processMessage({
       tenantId,
       customerId: customer.id,
       messageId: message.id,
       messageText: text,
+      conversationHistory, // Phase 2: pass history for multi-turn extraction
       autoApproveEnabled: tenant.autoApproveEnabled,
       autoApproveThreshold: tenant.autoApproveThreshold,
       aiConfidenceThreshold: tenant.aiConfidenceThreshold,
     });
 
-    // Send follow-up question if order is incomplete
+    // ── Step 9: Update conversation state after extraction ───────
+    if (result.intent === 'ORDER') {
+      await this.conversationsService.updateAfterExtraction(
+        tenantId,
+        phone,
+        {}, // partialOrderData — could be enriched with extracted items in future
+        result.missingFields,
+      );
+    }
+
+    // ── Step 10: Send reply and update conversation ──────────────
     if (result.followUpQuestion) {
+      // Missing fields — ask follow-up, stay in COLLECTING_DETAILS
       await this.whatsappAdapter.sendTextMessage(phone, result.followUpQuestion);
+      await this.conversationsService.addBotReply(tenantId, phone, result.followUpQuestion);
+
+      this.logger.log(`[${tenantId}] Follow-up sent for ${phone}: "${result.followUpQuestion}"`);
+    } else if (result.draftOrderId) {
+      // Draft order created — complete the conversation
+      await this.conversationsService.completeConversation(tenantId, phone);
+
+      const confirmMsg = `✅ Your order has been received and is pending review by the store owner. You'll be notified once it's confirmed!`;
+      await this.whatsappAdapter.sendTextMessage(phone, confirmMsg);
+
+      this.logger.log(
+        `[${tenantId}] Draft order ${result.draftOrderId} created — conversation completed`,
+      );
     }
 
     this.logger.log(

@@ -1,6 +1,7 @@
 import { Module } from '@nestjs/common';
 import { ConfigModule } from '@nestjs/config';
 import { ThrottlerModule } from '@nestjs/throttler';
+import { EventEmitterModule } from '@nestjs/event-emitter';
 import { DatabaseModule } from './common/database/database.module';
 import { AuthModule } from './modules/auth/auth.module';
 import { WhatsAppModule } from './modules/whatsapp/whatsapp.module';
@@ -8,6 +9,8 @@ import { AiEngineModule } from './modules/ai-engine/ai-engine.module';
 import { OrdersModule } from './modules/orders/orders.module';
 import { ProductsModule } from './modules/products/products.module';
 import { NotificationsModule } from './modules/notifications/notifications.module';
+import { ConversationsModule } from './modules/conversations/conversations.module';
+import { IntegrationsModule } from './modules/integrations/integrations.module';
 
 /**
  * AppModule — Root module
@@ -29,6 +32,9 @@ import { NotificationsModule } from './modules/notifications/notifications.modul
       { name: 'long', ttl: 60000, limit: 100 },
     ]),
 
+    // ── Event Emitter ────────────────────────────────────────────
+    EventEmitterModule.forRoot(),
+
     // ── Database (Global) ─────────────────────────────────────────
     DatabaseModule,
 
@@ -42,8 +48,11 @@ import { NotificationsModule } from './modules/notifications/notifications.modul
     ProductsModule,
     NotificationsModule,
 
-    // TODO (Phase 2): ConversationsModule
-    // TODO (Phase 3): AuditLogsModule
+    // ── Phase 2: Intelligence Layer ──────────────────────────────────
+    ConversationsModule,
+
+    // ── Phase 3: Integrations Layer ──────────────────────────────────
+    IntegrationsModule,
   ],
 })
 export class AppModule {}

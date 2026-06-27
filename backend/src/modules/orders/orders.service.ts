@@ -4,6 +4,7 @@ import {
   BadRequestException,
   Logger,
 } from '@nestjs/common';
+import { OnEvent, EventEmitter2 } from '@nestjs/event-emitter';
 import { v4 as uuidv4 } from 'uuid';
 import { PrismaService } from '../../common/database/prisma.service';
 import {
@@ -27,7 +28,10 @@ import {
 export class OrdersService {
   private readonly logger = new Logger(OrdersService.name);
 
-  constructor(private readonly prisma: PrismaService) {}
+  constructor(
+    private readonly prisma: PrismaService,
+    private readonly eventEmitter: EventEmitter2,
+  ) {}
 
   /**
    * Get all draft orders pending owner approval.
@@ -189,6 +193,9 @@ export class OrdersService {
 
     this.logger.log(`[${tenantId}] Order approved: ${order.orderNumber} (${orderId})`);
 
+    // Emit event so IntegrationsModule can sync to WooCommerce
+    this.eventEmitter.emit('order.approved', { tenantId, orderId });
+
     return order;
   }
 
@@ -330,4 +337,118 @@ export class OrdersService {
     const year = new Date().getFullYear();
     return `ORD-${year}-${String(count + 1).padStart(4, '0')}`;
   }
+
+  /**
+   * Record owner corrections to an AI draft order.
+   *
+   * Phase 2 — AI Correction Logging (training signal).
+   * Stores the diff between what the AI extracted and what the owner corrected.
+   * This data is used for future model fine-tuning and evaluation.
+   *
+   * Architecture Rule: This is the only method that writes to humanCorrections.
+   * The AuditLog record is immutable.
+   */
+  async saveDraftCorrections(
+    tenantId: string,
+    draftId: string,
+    correctedData: Record<string, unknown>,
+    userId: string,
+  ): Promise<void> {
+    const draft = await this.prisma.aIDraftOrder.findFirst({
+      where: { id: draftId, tenantId, deletedAt: null },
+    });
+
+    if (!draft) {
+      throw new NotFoundException(`Draft order not found: ${draftId}`);
+    }
+
+    if (draft.status !== AIDraftStatus.PENDING && draft.status !== AIDraftStatus.REVIEWED) {
+      throw new BadRequestException(
+        `Cannot correct a draft in status: ${draft.status}. Only PENDING or REVIEWED drafts can be corrected.`,
+      );
+    }
+
+    // Build correction diff: compare original AI extraction vs. owner's corrections
+    const originalData = draft.structuredData as Record<string, unknown>;
+    const fieldsCorrected = this.computeCorrectedFields(originalData, correctedData);
+
+    const corrections = {
+      originalAiExtraction: originalData,
+      ownerCorrections: correctedData,
+      fieldsCorrected,
+      correctedAt: new Date().toISOString(),
+    };
+
+    // Update the draft with corrections
+    await this.prisma.aIDraftOrder.update({
+      where: { id: draftId },
+      data: {
+        humanCorrections: corrections as object,
+        correctedByUserId: userId,
+        correctedAt: new Date(),
+        status: AIDraftStatus.REVIEWED,
+        structuredData: correctedData as object, // Update the working copy with owner's version
+      },
+    });
+
+    // Write immutable audit log (architecture rule: audit logs are never updated/deleted)
+    await this.prisma.auditLog.create({
+      data: {
+        id: uuidv4(),
+        tenantId,
+        actorUserId: userId,
+        actorType: 'USER',
+        action: 'AI_CORRECTION_RECORDED',
+        entityType: 'AIDraftOrder',
+        entityId: draftId,
+        beforeState: { structuredData: originalData } as object,
+        afterState: { structuredData: correctedData, fieldsCorrected } as object,
+      },
+    });
+
+    this.logger.log(
+      `[${tenantId}] Draft ${draftId} corrected by user ${userId}. Fields changed: ${fieldsCorrected.join(', ') || 'none'}`,
+    );
+  }
+
+  /**
+   * Compute a flat list of field paths that differ between original and corrected data.
+   * Provides a quick summary of what the owner changed (e.g. ["items[0].quantity", "delivery_info.address"]).
+   */
+  private computeCorrectedFields(
+    original: Record<string, unknown>,
+    corrected: Record<string, unknown>,
+  ): string[] {
+    const changed: string[] = [];
+
+    const compare = (orig: unknown, corr: unknown, path: string) => {
+      if (JSON.stringify(orig) !== JSON.stringify(corr)) {
+        changed.push(path);
+      }
+    };
+
+    // Top-level keys
+    const allKeys = new Set([...Object.keys(original), ...Object.keys(corrected)]);
+    for (const key of allKeys) {
+      compare(original[key], corrected[key], key);
+    }
+
+    return changed;
+  }
+
+  /**
+   * Listen for auto-approval events from AiEngineService.
+   * Phase 2 — Confidence-Based Auto-Routing
+   */
+  @OnEvent('draft.auto_approve')
+  async handleAutoApproveEvent(payload: { tenantId: string; draftId: string }) {
+    this.logger.log(`[${payload.tenantId}] Auto-approving draft order ${payload.draftId}`);
+    try {
+      // We use 'SYSTEM' as the reviewerUserId to indicate AI auto-approval
+      await this.approveDraft(payload.tenantId, payload.draftId, 'SYSTEM');
+    } catch (error) {
+      this.logger.error(`[${payload.tenantId}] Auto-approve failed for draft ${payload.draftId}: ${error.message}`);
+    }
+  }
 }
+

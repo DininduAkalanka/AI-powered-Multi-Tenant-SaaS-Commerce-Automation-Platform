@@ -4,7 +4,10 @@ import { PrismaService } from '../../../common/database/prisma.service';
 import {
   ENTITY_EXTRACTION_SYSTEM_PROMPT,
   ENTITY_EXTRACTION_USER_PROMPT,
+  MULTI_TURN_ENTITY_EXTRACTION_SYSTEM_PROMPT,
+  MULTI_TURN_ENTITY_EXTRACTION_USER_PROMPT,
   PROMPT_VERSION,
+  PROMPT_VERSION_V2,
 } from '../prompts/system.prompts';
 import { AIProcessingStage } from '@prisma/client';
 
@@ -56,15 +59,25 @@ export class EntityExtractorService {
     messageId: string,
     messageText: string,
     catalogContext: string, // formatted product list from ProductRetrieverService
+    conversationHistory?: string[], // optional: previous messages in this conversation
   ): Promise<ExtractedOrder> {
     const startTime = Date.now();
+    const isMultiTurn = conversationHistory && conversationHistory.length > 0;
 
     this.logger.log(
-      `[${tenantId}] Extracting entities from: ${messageText.substring(0, 50)}...`,
+      `[${tenantId}] Extracting entities from: ${messageText.substring(0, 50)}... (${isMultiTurn ? 'multi-turn' : 'single-turn'})`,
     );
 
-    const systemPrompt = ENTITY_EXTRACTION_SYSTEM_PROMPT;
-    const userPrompt = ENTITY_EXTRACTION_USER_PROMPT(messageText, catalogContext);
+    // Use multi-turn prompt when conversation history is available
+    const systemPrompt = isMultiTurn
+      ? MULTI_TURN_ENTITY_EXTRACTION_SYSTEM_PROMPT
+      : ENTITY_EXTRACTION_SYSTEM_PROMPT;
+
+    const userPrompt = isMultiTurn
+      ? MULTI_TURN_ENTITY_EXTRACTION_USER_PROMPT(conversationHistory, messageText, catalogContext)
+      : ENTITY_EXTRACTION_USER_PROMPT(messageText, catalogContext);
+
+    const promptVersion = isMultiTurn ? PROMPT_VERSION_V2 : PROMPT_VERSION;
 
     const response = await this.gemini.generateText(systemPrompt, userPrompt, {
       temperature: 0.05,
@@ -99,10 +112,10 @@ export class EntityExtractorService {
         tenantId,
         messageId,
         stage: AIProcessingStage.ENTITY_EXTRACTION,
-        inputData: { message: messageText, catalogContext, systemPrompt, userPrompt },
+        inputData: { message: messageText, catalogContext, conversationHistory, systemPrompt, userPrompt },
         outputData: result as object,
         modelUsed: response.modelUsed,
-        promptVersion: PROMPT_VERSION,
+        promptVersion,
         processingTimeMs,
         tokenCount: response.tokenCount,
         productMatchConfidence: avgMatchConfidence,

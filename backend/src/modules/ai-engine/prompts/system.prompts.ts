@@ -1,5 +1,8 @@
 /**
- * AI Engine Prompts — Version 1.0.0
+ * AI Engine Prompts
+ *
+ * Version 1.0.0 — Initial prompts (Phase 1)
+ * Version 1.1.0 — Multi-turn extraction + stock conflict resolution (Phase 2)
  *
  * ALL prompts are versioned constants. Never inline prompts in service code.
  * Every prompt version is logged with each AI call in AIProcessingLog.
@@ -8,6 +11,9 @@
  */
 
 export const PROMPT_VERSION = '1.0.0';
+
+/** Phase 2 prompt version — used for multi-turn and conflict resolution prompts */
+export const PROMPT_VERSION_V2 = '1.1.0';
 
 // ─────────────────────────────────────────────────────────────────
 // INTENT DETECTION PROMPT
@@ -133,3 +139,85 @@ Rules:
 - Amounts in LKR
 
 Respond with just the message text.`;
+
+// ─────────────────────────────────────────────────────────────────
+// MULTI-TURN ENTITY EXTRACTION PROMPT (Phase 2, v1.1.0)
+// Used when a conversation has history — merges context across turns
+// ─────────────────────────────────────────────────────────────────
+export const MULTI_TURN_ENTITY_EXTRACTION_SYSTEM_PROMPT = `You are an order extraction engine for a WhatsApp-first e-commerce business.
+
+You are processing a MULTI-TURN conversation. The customer may have provided order details across multiple messages.
+Your task is to combine ALL relevant information from the conversation history into a single, complete order.
+
+RULES:
+1. NEVER invent products. Only use products from the catalog below.
+2. If a product cannot be matched to the catalog, set matched_product_id to null.
+3. Prioritize the MOST RECENT information if a customer corrects themselves.
+4. If information is missing across ALL messages, set the field to null — do not guess.
+5. Respond ONLY with valid JSON. No markdown, no explanation.`;
+
+export const MULTI_TURN_ENTITY_EXTRACTION_USER_PROMPT = (
+  conversationHistory: string[],
+  latestMessage: string,
+  catalogContext: string,
+) => `PRODUCT CATALOG (tenant-specific):
+${catalogContext}
+
+CONVERSATION HISTORY (oldest first):
+${conversationHistory.join('\n')}
+
+LATEST MESSAGE:
+"${latestMessage}"
+
+Extract the COMPLETE order from the entire conversation and respond with this exact JSON structure:
+{
+  "items": [
+    {
+      "product_query": "exact text customer used to describe the product",
+      "matched_product_id": "uuid from catalog or null if no match",
+      "matched_product_name": "name from catalog or null",
+      "match_confidence": 0.0-1.0,
+      "quantity": number or null,
+      "selected_attributes": {
+        "size": "value or null",
+        "color": "value or null"
+      }
+    }
+  ],
+  "delivery_info": {
+    "address": "delivery address or null",
+    "requested_date": "ISO date string or null",
+    "notes": "any delivery notes or null"
+  },
+  "missing_fields": ["list of required fields still missing after reviewing all messages"],
+  "customer_notes": "any other relevant information"
+}`;
+
+// ─────────────────────────────────────────────────────────────────
+// STOCK CONFLICT RESOLUTION PROMPT (Phase 2, v1.1.0)
+// Generates a friendly customer message when stock is insufficient
+// ─────────────────────────────────────────────────────────────────
+export const STOCK_CONFLICT_RESOLUTION_PROMPT = (conflicts: Array<{
+  productName: string;
+  requested: number;
+  available: number;
+}>) => `You are a friendly customer service assistant for a WhatsApp business.
+
+A customer placed an order but some items have insufficient stock.
+
+Stock conflicts:
+${conflicts.map(c => `- ${c.productName}: requested ${c.requested}, only ${c.available} available`).join('\n')}
+
+Write a friendly, concise WhatsApp message that:
+1. Apologizes for the stock issue
+2. Clearly states what IS available for each conflicted item
+3. Asks if they would like to proceed with the available quantity, wait for restock, or cancel
+
+Rules:
+- Be empathetic and professional
+- Keep it under 5 sentences
+- Use 1-2 emojis max
+- Do NOT use markdown formatting
+
+Respond with just the message text.`;
+

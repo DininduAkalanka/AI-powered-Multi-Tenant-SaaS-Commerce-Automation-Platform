@@ -5,6 +5,7 @@ import { IntentDetectorService } from './pipeline/intent-detector.service';
 import { ProductRetrieverService } from './pipeline/product-retriever.service';
 import { EntityExtractorService } from './pipeline/entity-extractor.service';
 import { ConfidenceScorerService } from './pipeline/confidence-scorer.service';
+import { ConflictResolverService } from './pipeline/conflict-resolver.service';
 
 @Module({
   providers: [
@@ -14,7 +15,9 @@ import { ConfidenceScorerService } from './pipeline/confidence-scorer.service';
     ProductRetrieverService,
     EntityExtractorService,
     ConfidenceScorerService,
+    ConflictResolverService,
   ],
-  exports: [AiEngineService, ProductRetrieverService],
+  exports: [AiEngineService, ProductRetrieverService, ConflictResolverService],
 })
 export class AiEngineModule {}
+

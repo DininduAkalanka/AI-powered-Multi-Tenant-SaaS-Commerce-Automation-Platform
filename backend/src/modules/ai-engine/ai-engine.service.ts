@@ -7,12 +7,15 @@ import { ProductRetrieverService } from './pipeline/product-retriever.service';
 import { EntityExtractorService } from './pipeline/entity-extractor.service';
 import { ConfidenceScorerService } from './pipeline/confidence-scorer.service';
 import { AIDraftStatus, AIProcessingStage } from '@prisma/client';
+import { EventEmitter2 } from '@nestjs/event-emitter';
 
 export interface ProcessMessageInput {
   tenantId: string;
   customerId: string;
   messageId: string;
   messageText: string;
+  /** Previous messages in this conversation — for multi-turn extraction */
+  conversationHistory?: string[];
   // Tenant config
   autoApproveEnabled: boolean;
   autoApproveThreshold: number;
@@ -53,6 +56,7 @@ export class AiEngineService {
     private readonly productRetriever: ProductRetrieverService,
     private readonly entityExtractor: EntityExtractorService,
     private readonly confidenceScorer: ConfidenceScorerService,
+    private readonly eventEmitter: EventEmitter2,
   ) {}
 
   /**
@@ -100,11 +104,13 @@ export class AiEngineService {
     }
 
     // ── Stage 3: Entity Extraction ───────────────────────────────
+    // Pass conversation history for multi-turn context merging
     const extractedOrder = await this.entityExtractor.extract(
       input.tenantId,
       input.messageId,
       input.messageText,
       catalogContext,
+      input.conversationHistory ?? [],
     );
 
     // ── Stage 4: Confidence Scoring ──────────────────────────────
@@ -141,6 +147,15 @@ export class AiEngineService {
         aiProcessedAt: new Date(),
       },
     });
+
+    // ── Stage 6: Auto-Approval Flow (Phase 2) ─────────────────────
+    if (draftOrderId && confidenceScores.routing === 'AUTO_APPROVE_ELIGIBLE') {
+      this.logger.log(`[${input.tenantId}] Draft ${draftOrderId} is eligible for auto-approval. Emitting event.`);
+      this.eventEmitter.emit('draft.auto_approve', {
+        tenantId: input.tenantId,
+        draftId: draftOrderId,
+      });
+    }
 
     const totalTimeMs = Date.now() - pipelineStart;
     this.logger.log(

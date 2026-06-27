@@ -5,9 +5,10 @@ import { WhatsAppService } from './whatsapp.service';
 import { MockWhatsAppAdapter } from './adapters/mock-whatsapp.adapter';
 import { WHATSAPP_ADAPTER } from './interfaces/whatsapp-adapter.interface';
 import { AiEngineModule } from '../ai-engine/ai-engine.module';
+import { ConversationsModule } from '../conversations/conversations.module';
 
 @Module({
-  imports: [AiEngineModule],
+  imports: [AiEngineModule, ConversationsModule],
   controllers: [WhatsAppController],
   providers: [
     WhatsAppService,

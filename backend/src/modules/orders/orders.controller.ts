@@ -15,6 +15,7 @@ import { Roles } from '../../common/decorators/roles.decorator';
 import { CurrentTenant } from '../../common/decorators/current-tenant.decorator';
 import { CurrentUser } from '../../common/decorators/current-user.decorator';
 import { OrdersService } from './orders.service';
+import { CorrectDraftDto } from './dto/correct-draft.dto';
 import type { JwtPayload } from '../auth/interfaces/jwt-payload.interface';
 import { UserRole, OrderStatus } from '@prisma/client';
 import { IsOptional, IsString } from 'class-validator';
@@ -118,4 +119,30 @@ export class OrdersController {
     });
     return { success: true, data: result };
   }
+
+  /**
+   * Record owner corrections to an AI draft before approval.
+   * Stores the diff as a training signal in AIDraftOrder.humanCorrections.
+   *
+   * PATCH /api/v1/orders/drafts/:id/correct
+   */
+  @Patch('drafts/:id/correct')
+  @UseGuards(JwtAuthGuard, RolesGuard)
+  @Roles(UserRole.OWNER, UserRole.STAFF)
+  @HttpCode(HttpStatus.OK)
+  async correctDraft(
+    @CurrentTenant() tenantId: string,
+    @CurrentUser() user: JwtPayload,
+    @Param('id') draftId: string,
+    @Body() dto: CorrectDraftDto,
+  ) {
+    await this.ordersService.saveDraftCorrections(
+      tenantId,
+      draftId,
+      dto.correctedData,
+      user.sub,
+    );
+    return { success: true, message: 'Corrections saved. Draft is ready for approval.' };
+  }
 }
+
